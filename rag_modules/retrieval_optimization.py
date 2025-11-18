@@ -55,29 +55,62 @@ class RetrievalOptimizationModule:
         return reranked_docs[:top_k]
 
     def _rrf_rerank(
-        self, vector_results: List[Document], bm25_results: List[Document]
+        self, vector_results: List[Document], bm25_results: List[Document], k: int = 60
     ) -> List[Document]:
-        """RRF (Reciprocal Rank Fusion) 重排"""
+        """
+        使用RRF (Reciprocal Rank Fusion) 算法重排文档
+
+        Args:
+            vector_docs: 向量检索结果
+            bm25_docs: BM25检索结果
+            k: RRF参数，用于平滑排名
+
+        Returns:
+            重排后的文档列表
+        """
 
         #  RRF融合算法
-        rrf_scores = {}
-        k = 60  # RRF默认参数
+        doc_scores = {}
+        doc_object = {}
 
         # 计算向量检索的RRF分数
         for rank, doc in enumerate(vector_results):
-            doc_id = id(doc)
-            rrf_scores[doc_id] = rrf_scores.get(doc_id, 0) + 1 / (k + rank + 1)
-        # 计算BM25检索的RRF分数
-        for rank, doc in enumerate(bm25_results):
-            doc_id = id(doc)
-            rrf_scores[doc_id] = rrf_scores.get(doc_id, 0) + 1 / (k + rank + 1)
-        # 合并所有文档并按照RRF分数排序
-        all_docs = {id(doc): doc for doc in vector_results + bm25_results}
-        sorted_docs = sorted(
-            all_docs.items(), key=lambda x: rrf_scores.get(x[0], 0), reverse=True
-        )
+            doc_id = hash(doc.page_content)
+            doc_object[doc_id] = doc
 
-        return [doc for _, doc in sorted_docs]
+            # RRF公式 1/(K+RANK)
+            rrf_score = 1.0 / (k + rank + 1)
+            doc_scores[doc_id] = doc_scores.get(doc_id, 0) + rrf_score
+
+            logger.debug(f"向量检索 - 文档{rank+1}: RRF分数 = {rrf_score:.4f}")
+        # 计算BM25检索结果的RRF分数
+        for rank, doc in enumerate(bm25_results):
+            doc_id = hash(doc.page_content)
+            doc_object[doc_id] = doc
+
+            rrf_score = 1.0 / (k + rank + 1)
+            doc_scores[doc_id] = doc_scores.get(doc_id, 0) + rrf_score
+
+            logger.debug(f"BM25检索 - 文档{rank+1}: RRF分数 = {rrf_score:.4f}")
+
+        # 按最终RRF分数排序
+        sorted_docs = sorted(doc_scores.items(), key=lambda x: x[1], reverse=True)
+
+        # 构建最终结果
+        reranked_docs = []
+        for doc_id, final_score in sorted_docs:
+            if doc_id in doc_object:
+                doc = doc_object[doc_id]
+                # 将RRF分数添加到文档元数据中
+                doc.metadata["rrf_score"] = final_score
+                reranked_docs.append(doc)
+                logger.debug(
+                    f"最终排序 - 文档: {doc.page_content[:50]}... 最终RRF分数: {final_score:.4f}"
+                )
+        logger.info(
+            f"RRF重排完成: 向量检索{len(vector_results)}个文档, BM25检索{len(bm25_results)}个文档, 合并后{len(reranked_docs)}个文档"
+        )
+        return reranked_docs
 
     def metadata_filtered_search(
         self, query: str, filters: Dict[str, Any], top_k: int = 5
@@ -93,9 +126,29 @@ class RetrievalOptimizationModule:
         Returns:
             过滤后的文档列表
         """
-        # 先进行向量检索
-        vector_retriever = self.vectorstore.as_retriever(
-            search_type="similarity", search_kwargs={"k": top_k * 3, "filter": filters}
-        )
-        results = vector_retriever.invoke(query)
-        return results[:top_k]
+        # 先进行混合检索，获取更多候选
+        docs = self.hybrid_search(query, top_k * 3)
+
+        # 使用元数据过滤
+        filtered_docs = []
+        for doc in docs:
+            match = True
+            for key, value in filters.items():
+                if key in doc.metadata:
+                    if isinstance(value, list):
+                        if doc.metadata[key] not in value:
+                            match = False
+                            break
+                    else:
+                        if doc.metadata[key] != value:
+                            match = False
+                            break
+                else:
+                    match = False
+                    break
+
+            if match:
+                filtered_docs.append(doc)
+                if len(filtered_docs) >= top_k:
+                    break
+        return filtered_docs
