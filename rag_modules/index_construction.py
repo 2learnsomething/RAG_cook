@@ -3,7 +3,7 @@ from pathlib import Path
 import logging
 
 from langchain_community.vectorstores import FAISS
-from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_core.documents import Document
 
 logger = logging.getLogger(__name__)
@@ -30,7 +30,7 @@ class IndexConstructionModule:
         self.vectorstore = None  # Faiss向量存储实例
         self.setup_embeddings()
 
-    def setup_embedings(self):
+    def setup_embeddings(self):
         """初始化嵌入模型"""
         logger.info(f"正在初始化嵌入模型: {self.model_name}")
 
