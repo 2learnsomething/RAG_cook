@@ -140,7 +140,7 @@ class AdvancedGraphRAGSystem:
                         chunk_overlap=self.config.chunk_overlap,
                     )
 
-                    self._initial_retrievers(chunks)
+                    self._initialize_retrievers(chunks)
                     return
                 else:
                     print("❌ 知识库加载失败，开始重建...")

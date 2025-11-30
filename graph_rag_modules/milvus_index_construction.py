@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 
 
 class MilvusIndexConstructionModule:
-    """负责Milvus索引构建模块 - 负责向量化和milvus索引构建"""
+    """Milvus索引构建模块 - 负责向量化和Milvus索引构建"""
 
     def __init__(
         self,
@@ -48,8 +48,23 @@ class MilvusIndexConstructionModule:
         self._setup_client()
         self._setup_embeddings()
 
+    def _safe_truncate(self, text: str, max_length: int) -> str:
+        """
+        安全截取字符串，处理None值
+
+        Args:
+            text: 输入文本
+            max_length: 最大长度
+
+        Returns:
+            截取后的字符串
+        """
+        if text is None:
+            return ""
+        return str(text)[:max_length]
+
     def _setup_client(self):
-        """初始化milvus客户端"""
+        """初始化Milvus客户端"""
         try:
             self.client = MilvusClient(uri=f"http://{self.host}:{self.port}")
             logger.info(f"已连接到Milvus服务器: {self.host}:{self.port}")
@@ -57,6 +72,7 @@ class MilvusIndexConstructionModule:
             # 测试连接
             collections = self.client.list_collections()
             logger.info(f"连接成功，当前集合: {collections}")
+
         except Exception as e:
             logger.error(f"连接Milvus失败: {e}")
             raise
@@ -72,21 +88,6 @@ class MilvusIndexConstructionModule:
         )
 
         logger.info("嵌入模型初始化完成")
-
-    def _safe_truncate(self, text: str, max_length: int) -> str:
-        """
-        安全截取字符串，处理None值
-
-        Args:
-            text: 输入文本
-            max_length: 最大长度
-
-        Returns:
-            截取后的字符串
-        """
-        if text is None:
-            return ""
-        return str(text)[:max_length]
 
     def _create_collection_schema(self) -> CollectionSchema:
         """
@@ -138,20 +139,24 @@ class MilvusIndexConstructionModule:
                     logger.info(f"集合 {self.collection_name} 已存在")
                     self.collection_created = True
                     return True
+
+            # 创建集合
             schema = self._create_collection_schema()
 
             self.client.create_collection(
                 collection_name=self.collection_name,
                 schema=schema,
-                metric_type="COSINE",
+                metric_type="COSINE",  # 使用余弦相似度
                 consistency_level="Strong",
             )
 
             logger.info(f"成功创建集合: {self.collection_name}")
             self.collection_created = True
+
             return True
+
         except Exception as e:
-            logger.error(f"创建集合失败：{e}")
+            logger.error(f"创建集合失败: {e}")
             return False
 
     def create_index(self) -> bool:
@@ -163,54 +168,28 @@ class MilvusIndexConstructionModule:
         """
         try:
             if not self.collection_created:
-                raise ValueError("请先创造集合")
+                raise ValueError("请先创建集合")
 
-                # 使用prepare_index_params创建正确的IndexParams对象
+            # 使用prepare_index_params创建正确的IndexParams对象
             index_params = self.client.prepare_index_params()
+
+            # 添加向量字段索引
             index_params.add_index(
                 field_name="vector",
                 index_type="HNSW",
                 metric_type="COSINE",
-                params={"M": 16, "efConstruction": 20},
+                params={"M": 16, "efConstruction": 200},
             )
+
             self.client.create_index(
                 collection_name=self.collection_name, index_params=index_params
             )
+
             logger.info("向量索引创建成功")
             return True
-        except Exception as e:
-            logger.error(f"创建索引失败：{e}")
-            return False
-
-    def verify_index(self) -> bool:
-        """验证索引构建结果"""
-        try:
-            collection_name = self.config.milvus_collection_name
-
-            # 检查集合状态
-            collection_info = self.milvus_client.describe_collection(collection_name)
-            logger.info(f"集合信息: {collection_info}")
-
-            # 检查数据量
-            count = self.milvus_client.query(
-                collection_name=collection_name, expr="", output_fields=["count(*)"]
-            )
-            logger.info(f"索引中文档数量: {count}")
-
-            # 简单检索测试
-            test_results = self.milvus_client.search(
-                collection_name=collection_name,
-                data=[[0.1] * self.config.embedding_dim],  # 测试向量
-                anns_field="vector",
-                param={"metric_type": "COSINE", "params": {"nprobe": 10}},
-                limit=1,
-            )
-
-            logger.info("索引验证通过")
-            return True
 
         except Exception as e:
-            logger.error(f"索引验证失败: {e}")
+            logger.error(f"创建索引失败: {e}")
             return False
 
     def build_vector_index(self, chunks: List[Document]) -> bool:
@@ -223,24 +202,24 @@ class MilvusIndexConstructionModule:
         Returns:
             是否构建成功
         """
-        logger.info(f"正在创建Milvus向量索引,文档数量:{len(chunks)}...")
+        logger.info(f"正在构建Milvus向量索引，文档数量: {len(chunks)}...")
 
         if not chunks:
-            raise ValueError("文档列表不能为空")
+            raise ValueError("文档块列表不能为空")
 
         try:
             # 1. 创建集合（如果schema不兼容则强制重新创建）
             if not self.create_collection(force_recreate=True):
                 return False
 
-            # 2.准备数据
+            # 2. 准备数据
             logger.info("正在生成向量embeddings...")
             texts = [chunk.page_content for chunk in chunks]
-            vectors = self.embeddings.embed_documents(texts=texts)
+            vectors = self.embeddings.embed_documents(texts)
 
-            # 3.准备插入数据
+            # 3. 准备插入数据
             entities = []
-            for i, (chunk, vector) in enumerate(zip(chunk, vectors)):
+            for i, (chunk, vector) in enumerate(zip(chunks, vectors)):
                 entity = {
                     "id": self._safe_truncate(
                         chunk.metadata.get("chunk_id", f"chunk_{i}"), 150
@@ -275,7 +254,7 @@ class MilvusIndexConstructionModule:
                 }
                 entities.append(entity)
 
-            # 4.批量插入数据
+            # 4. 批量插入数据
             logger.info("正在插入向量数据...")
             batch_size = 100
             for i in range(0, len(entities), batch_size):
@@ -285,11 +264,11 @@ class MilvusIndexConstructionModule:
                     f"已插入 {min(i + batch_size, len(entities))}/{len(entities)} 条数据"
                 )
 
-            # 5.创建索引
+            # 5. 创建索引
             if not self.create_index():
                 return False
 
-            # 6.加载集合到内存
+            # 6. 加载集合到内存
             self.client.load_collection(self.collection_name)
             logger.info("集合已加载到内存")
 
@@ -299,11 +278,12 @@ class MilvusIndexConstructionModule:
 
             logger.info(f"向量索引构建完成，包含 {len(chunks)} 个向量")
             return True
+
         except Exception as e:
-            logger.error(f"构建向量索引失败:{e}")
+            logger.error(f"构建向量索引失败: {e}")
             return False
 
-    def add_document(self, new_chunks: List[Document]) -> bool:
+    def add_documents(self, new_chunks: List[Document]) -> bool:
         """
         向现有索引添加新文档
 
@@ -314,14 +294,15 @@ class MilvusIndexConstructionModule:
             是否添加成功
         """
         if not self.collection_created:
-            raise ValueError("请先创建向量索引")
+            raise ValueError("请先构建向量索引")
 
         logger.info(f"正在添加 {len(new_chunks)} 个新文档到索引...")
 
         try:
             # 生成向量
             texts = [chunk.page_content for chunk in new_chunks]
-            vectors = self.embeddings.embed_documents(texts=texts)
+            vectors = self.embeddings.embed_documents(texts)
+
             # 准备插入数据
             entities = []
             for i, (chunk, vector) in enumerate(zip(new_chunks, vectors)):
@@ -370,8 +351,9 @@ class MilvusIndexConstructionModule:
 
             logger.info("新文档添加完成")
             return True
+
         except Exception as e:
-            logger.error(f"添加新文档失败：{e}")
+            logger.error(f"添加新文档失败: {e}")
             return False
 
     def similarity_search(
@@ -389,11 +371,11 @@ class MilvusIndexConstructionModule:
             搜索结果列表
         """
         if not self.collection_created:
-            raise ValueError("请先创建或加载想念索引")
+            raise ValueError("请先构建或加载向量索引")
 
         try:
             # 生成查询向量
-            query_vector = self.embeddings.embed_query(text=query)
+            query_vector = self.embeddings.embed_query(query)
 
             # 构建过滤表达式
             filter_expr = ""
@@ -401,73 +383,76 @@ class MilvusIndexConstructionModule:
                 filter_conditions = []
                 for key, value in filters.items():
                     if isinstance(value, str):
-                        filter_conditions.append(f"{key} == '{value}'")
+                        filter_conditions.append(f'{key} == "{value}"')
                     elif isinstance(value, (int, float)):
                         filter_conditions.append(f"{key} == {value}")
                     elif isinstance(value, list):
                         # 支持IN操作
                         if all(isinstance(v, str) for v in value):
-                            value_str = "','".join(value)
-                            filter_conditions.append(f"{key} in  ['{value}']")
+                            value_str = '", "'.join(value)
+                            filter_conditions.append(f'{key} in ["{value_str}"]')
                         else:
                             value_str = ", ".join(map(str, value))
                             filter_conditions.append(f"{key} in [{value_str}]")
+
                 if filter_conditions:
                     filter_expr = " and ".join(filter_conditions)
 
-                # 执行搜索 - 修复参数传递
-                search_params = {"metric_type": "COSINE", "params": {"ef": 64}}
+            # 执行搜索 - 修复参数传递
+            search_params = {"metric_type": "COSINE", "params": {"ef": 64}}
 
-                # 创建搜索参数,避免重复传播
-                search_kwargs = {
-                    "collection_name": self.collection_name,
-                    "data": [query_vector],
-                    "ann_field": "vector",
-                    "limit": k,
-                    "output_fields": [
-                        "text",
-                        "node_id",
-                        "recipe_name",
-                        "node_type",
-                        "category",
-                        "cuisine_type",
-                        "difficulty",
-                        "doc_type",
-                        "chunk_id",
-                        "parent_id",
-                    ],
-                    "search_params": search_params,
-                }
+            # 构建搜索参数，避免重复传递
+            search_kwargs = {
+                "collection_name": self.collection_name,
+                "data": [query_vector],
+                "anns_field": "vector",
+                "limit": k,
+                "output_fields": [
+                    "text",
+                    "node_id",
+                    "recipe_name",
+                    "node_type",
+                    "category",
+                    "cuisine_type",
+                    "difficulty",
+                    "doc_type",
+                    "chunk_id",
+                    "parent_id",
+                ],
+                "search_params": search_params,
+            }
 
-                if filter_expr:
-                    search_kwargs["filter"] = filter_expr
+            # 只在有过滤条件时添加filter参数
+            if filter_expr:
+                search_kwargs["filter"] = filter_expr
 
-                results = self.client.search(**search_kwargs)
+            results = self.client.search(**search_kwargs)
 
-                formatted_reuslts = []
-                if results and len(results) > 0:
-                    for hit in results[0]:  # results[0]因为我们只发送了一个查询向量
-                        result = {
-                            "id": hit["id"],
-                            "score": hit[
-                                "distance"
-                            ],  # 注意：在COSINE距离中，值越大相似度越高
-                            "text": hit["entity"]["text"],
-                            "metadata": {
-                                "node_id": hit["entity"]["node_id"],
-                                "recipe_name": hit["entity"]["recipe_name"],
-                                "node_type": hit["entity"]["node_type"],
-                                "category": hit["entity"]["category"],
-                                "cuisine_type": hit["entity"]["cuisine_type"],
-                                "difficulty": hit["entity"]["difficulty"],
-                                "doc_type": hit["entity"]["doc_type"],
-                                "chunk_id": hit["entity"]["chunk_id"],
-                                "parent_id": hit["entity"]["parent_id"],
-                            },
-                        }
-                        formatted_reuslts.append(result)
+            # 处理结果
+            formatted_results = []
+            if results and len(results) > 0:
+                for hit in results[0]:  # results[0]因为我们只发送了一个查询向量
+                    result = {
+                        "id": hit["id"],
+                        "score": hit[
+                            "distance"
+                        ],  # 注意：在COSINE距离中，值越大相似度越高
+                        "text": hit["entity"]["text"],
+                        "metadata": {
+                            "node_id": hit["entity"]["node_id"],
+                            "recipe_name": hit["entity"]["recipe_name"],
+                            "node_type": hit["entity"]["node_type"],
+                            "category": hit["entity"]["category"],
+                            "cuisine_type": hit["entity"]["cuisine_type"],
+                            "difficulty": hit["entity"]["difficulty"],
+                            "doc_type": hit["entity"]["doc_type"],
+                            "chunk_id": hit["entity"]["chunk_id"],
+                            "parent_id": hit["entity"]["parent_id"],
+                        },
+                    }
+                    formatted_results.append(result)
 
-            return formatted_reuslts
+            return formatted_results
 
         except Exception as e:
             logger.error(f"相似度搜索失败: {e}")
@@ -483,6 +468,7 @@ class MilvusIndexConstructionModule:
         try:
             if not self.collection_created:
                 return {"error": "集合未创建"}
+
             stats = self.client.get_collection_stats(self.collection_name)
             return {
                 "collection_name": self.collection_name,
@@ -490,6 +476,7 @@ class MilvusIndexConstructionModule:
                 "index_building_progress": stats.get("index_building_progress", 0),
                 "stats": stats,
             }
+
         except Exception as e:
             logger.error(f"获取集合统计信息失败: {e}")
             return {"error": str(e)}
@@ -504,12 +491,13 @@ class MilvusIndexConstructionModule:
         try:
             if self.client.has_collection(self.collection_name):
                 self.client.drop_collection(self.collection_name)
-                logger.info(f"集合{self.collection_name} 已删除")
+                logger.info(f"集合 {self.collection_name} 已删除")
                 self.collection_created = False
                 return True
             else:
-                logger.info(f"集合{self.collection_name} 不存在")
+                logger.info(f"集合 {self.collection_name} 不存在")
                 return True
+
         except Exception as e:
             logger.error(f"删除集合失败: {e}")
             return False
@@ -536,12 +524,14 @@ class MilvusIndexConstructionModule:
         """
         try:
             if not self.client.has_collection(self.collection_name):
-                logger.error(f"集合{self.collection_name} 不存在")
+                logger.error(f"集合 {self.collection_name} 不存在")
                 return False
+
             self.client.load_collection(self.collection_name)
             self.collection_created = True
             logger.info(f"集合 {self.collection_name} 已加载到内存")
             return True
+
         except Exception as e:
             logger.error(f"加载集合失败: {e}")
             return False

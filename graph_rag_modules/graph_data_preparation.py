@@ -79,7 +79,7 @@ class GraphDataPreparationModule:
             self.driver.close()
             logger.info("Neo4j连接已关闭")
 
-    def load_graph_data(self) -> List[Dict]:
+    def load_graph_data(self) -> Dict[str, Any]:
         """
         从Neo4j加载图数据
 
@@ -112,7 +112,7 @@ class GraphDataPreparationModule:
                 properties["category"] = record["mainCategory"]
                 properties["all_categories"] = record["allCategories"]
                 node = GraphNode(
-                    node_id=record["nodeID"],
+                    node_id=record["nodeId"],
                     labels=record["labels"],
                     name=record["name"],
                     properties=properties,
@@ -133,7 +133,7 @@ class GraphDataPreparationModule:
             self.ingredients = []
             for record in result:
                 node = GraphNode(
-                    node_id=record["nodeID"],
+                    node_id=record["nodeId"],
                     labels=record["labels"],
                     name=record["name"],
                     properties=record["properties"],
@@ -189,14 +189,18 @@ class GraphDataPreparationModule:
                            i.description as description
                     ORDER BY i.name
                     """
-                    ingredients_result = session.run(query=ingredients_query)
+                    ingredients_result = session.run(
+                        ingredients_query, {"recipe_id": recipe_id}
+                    )
                     ingredients_info = []
                     for ing_record in ingredients_result:
                         amount = ing_record.get("amount", "")
                         unit = ing_record.get("unit", "")
                         ingredients_text = f"{ing_record['name']}"
-                        if amount in unit:
+                        if amount and unit:
                             ingredients_text += f"({amount}{unit})"
+                        else:
+                            ingredients_text += amount if amount else ""
                         if ing_record.get("description", ""):
                             ingredients_text += f" - {ing_record['description']}"
                         ingredients_info.append(ingredients_text)
@@ -210,7 +214,7 @@ class GraphDataPreparationModule:
                            c.stepOrder as stepOrder
                     ORDER BY COALESCE(c.stepOrder, s.stepNumber, 999)
                     """
-                    step_result = session.run(query=steps_query)
+                    step_result = session.run(steps_query, {"recipe_id": recipe_id})
                     steps_info = []
                     for step_record in step_result:
                         step_text = f"步骤：{step_record['name']}"
